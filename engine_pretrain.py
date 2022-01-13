@@ -43,8 +43,8 @@ def train_one_epoch(model: torch.nn.Module,
             lr_sched.adjust_learning_rate(optimizer, data_iter_step / len(data_loader) + epoch, args)
 
         samples = samples.to(device, non_blocking=True)
-
-        with torch.cuda.amp.autocast():
+        
+        with torch.cuda.amp.autocast(enabled=not args.disable_amp):
             loss, _, _ = model(samples, mask_ratio=args.mask_ratio)
 
         loss_value = loss.item()
@@ -54,8 +54,15 @@ def train_one_epoch(model: torch.nn.Module,
             sys.exit(1)
 
         loss /= accum_iter
-        loss_scaler(loss, optimizer, parameters=model.parameters(),
-                    update_grad=(data_iter_step + 1) % accum_iter == 0)
+
+        if args.disable_amp:
+            loss.backward()
+            if (data_iter_step + 1) % accum_iter == 0:
+                optimizer.step()
+        else:
+            loss_scaler(loss, optimizer, parameters=model.parameters(),
+                        update_grad=(data_iter_step + 1) % accum_iter == 0)
+
         if (data_iter_step + 1) % accum_iter == 0:
             optimizer.zero_grad()
 
