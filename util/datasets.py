@@ -39,6 +39,7 @@ def build_transform(is_train, args, linear=False):
             normalize = transforms.Normalize(mean=mean, std=std)
             transform = transforms.Compose([
                 transforms.RandomResizedCrop(args.input_size),
+
                 transforms.ToTensor(),
                 normalize
             ])

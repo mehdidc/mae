@@ -21,7 +21,7 @@ def linear(*, nb_nodes=16, checkpoint="results/imagenet1k", model="vit_large_pat
     os.makedirs(out, exist_ok=True)
     script = f"run_{machine}_ddp.sh"
     data = datasets[data]
-    cmd = f"sbatch  --output {out}/out --error {out}/err -N {nb_nodes} -n {nb_nodes*4} scripts/{script} main_linear_probe.py --finetune {checkpoint} --batch_size {batch_size} --model {model} --epochs {epochs}  --warmup_epochs {warmup_epochs} --blr {blr} --num_workers {num_workers} --output_dir {out} --cls_token {data}"
+    cmd = f"sbatch  --output {out}/out --error {out}/err -N {nb_nodes} -n {nb_nodes*4} scripts/{script} main_linprobe.py --finetune {checkpoint} --batch_size {batch_size} --model {model} --epochs {epochs}  --warmup_epochs {warmup_epochs} --blr {blr} --num_workers {num_workers} --output_dir {out} --cls_token {data}"
     print(cmd)
     call(cmd,shell=True)
 

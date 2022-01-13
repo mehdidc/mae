@@ -12,6 +12,7 @@
 import argparse
 import datetime
 import json
+from glob import glob
 import numpy as np
 import os
 import time
@@ -77,12 +78,14 @@ def get_args_parser():
     # Dataset parameters
     parser.add_argument('--data_path', default='/datasets01/imagenet_full_size/061417/', type=str,
                         help='dataset path')
+    parser.add_argument('--data_type', default='lmdb', type=str,
+                        help='dataset path')
     parser.add_argument('--nb_classes', default=1000, type=int,
                         help='number of the classification types')
 
     parser.add_argument('--output_dir', default='./output_dir',
                         help='path where to save, empty for no saving')
-    parser.add_argument('--log_dir', default='./output_dir',
+    parser.add_argument('--log_dir', default='',
                         help='path where to tensorboard log')
     parser.add_argument('--device', default='cuda',
                         help='device to use for training / testing')
@@ -115,6 +118,8 @@ def get_args_parser():
 
 def main(args):
     misc.init_distributed_mode(args)
+    if not args.log_dir:
+        args.log_dir = args.output_dir
 
     print('job dir: {}'.format(os.path.dirname(os.path.realpath(__file__))))
     print("{}".format(args).replace(', ', ',\n'))
@@ -139,8 +144,15 @@ def main(args):
             transforms.CenterCrop(224),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
-    dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'train'), transform=transform_train)
-    dataset_val = datasets.ImageFolder(os.path.join(args.data_path, 'val'), transform=transform_val)
+    if args.data_type == "image_folder":
+        dataset_train = datasets.ImageFolder(os.path.join(args.data_path, "train"), transform=transform_train)
+        dataset_val = datasets.ImageFolder(os.path.join(args.data_path, "val"), transform=transform_val)
+    elif args.data_type == "lmdb":
+        dataset_train = CaffeLMDB(os.path.join(args.data_path, "train"), transform=transform_train, label_type="int")
+        dataset_val = CaffeLMDB(os.path.join(args.data_path, "val"), transform=transform_val, label_type="int")
+    # dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'train'), transform=transform_train)
+    # dataset_val = datasets.ImageFolder(os.path.join(args.data_path, 'val'), transform=transform_val)
+
     print(dataset_train)
     print(dataset_val)
 
@@ -190,6 +202,22 @@ def main(args):
         num_classes=args.nb_classes,
         global_pool=args.global_pool,
     )
+    if os.path.isdir(args.finetune):
+        #auto select latest checkpoint
+        ckpts = {}
+        for path in glob(os.path.join(args.finetune, "*.pth")):
+            name = os.path.basename(path)
+            try:
+                name = name.split(".")[0]
+                name = name.split("-")[1]
+                epoch = int(name)
+                ckpts[epoch] = path
+            except Exception:
+                ckpts[-1] = path
+        if len(ckpts):
+            last_epoch = max(ckpts.keys())
+            args.finetune = ckpts[last_epoch]
+            print("Auto load from ", args.finetune)
 
     if args.finetune and not args.eval:
         checkpoint = torch.load(args.finetune, map_location='cpu')
