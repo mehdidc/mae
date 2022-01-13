@@ -67,11 +67,18 @@ def get_args_parser():
     parser.add_argument('--warmup_epochs', type=int, default=10, metavar='N',
                         help='epochs to warmup LR')
 
+    parser.add_argument('--label_type', default="int", type=str,
+                        help='images input size')
     # * Finetuning params
     parser.add_argument('--finetune', default='',
                         help='finetune from checkpoint')
     parser.add_argument('--global_pool', action='store_true')
     parser.set_defaults(global_pool=False)
+    
+    
+    parser.add_argument('--save', default=False, action='store_true')
+    parser.set_defaults(save=False)
+
     parser.add_argument('--cls_token', action='store_false', dest='global_pool',
                         help='Use class token instead of global pool for classification')
 
@@ -148,6 +155,7 @@ def main(args):
         dataset_train = datasets.ImageFolder(os.path.join(args.data_path, "train"), transform=transform_train)
         dataset_val = datasets.ImageFolder(os.path.join(args.data_path, "val"), transform=transform_val)
     elif args.data_type == "lmdb":
+        from neotl.datasets.caffe_lmdb import CaffeLMDB, CaffeLMDBMultiple
         dataset_train = CaffeLMDB(os.path.join(args.data_path, "train"), transform=transform_train, label_type="int")
         dataset_val = CaffeLMDB(os.path.join(args.data_path, "val"), transform=transform_val, label_type="int")
     # dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'train'), transform=transform_train)
@@ -305,7 +313,7 @@ def main(args):
             log_writer=log_writer,
             args=args
         )
-        if args.output_dir:
+        if args.output_dir and args.save:
             misc.save_model(
                 args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
                 loss_scaler=loss_scaler, epoch=epoch)

@@ -5,6 +5,10 @@ machine = open("/etc/FZJ/systemname").read().strip()
 datasets = {
     "imagenet1k": "--data_path datasets/imagenet-1K-lmdb/train --label_type int --data_type lmdb",
     "imagenet21k": "--data_path datasets/imagenet-21K-lmdb --label_type int --data_type lmdb",
+}
+finetune_datasets = {
+    "imagenet1k": "--data_path datasets/imagenet-1K-lmdb --label_type int --data_type lmdb",
+    "imagenet21k": "--data_path datasets/imagenet-21K-lmdb --label_type int --data_type lmdb",
     "cifar10": "--data_path datasets/cifar10 --data_type image_folder --nb_classes 10",
 }
 
@@ -20,7 +24,7 @@ def linear(*, nb_nodes=16, checkpoint="results/imagenet1k", model="vit_large_pat
         out = os.path.join(checkpoint, f"linear_probe_{data}")
     os.makedirs(out, exist_ok=True)
     script = f"run_{machine}_ddp.sh"
-    data = datasets[data]
+    data = finetune_datasets[data]
     cmd = f"sbatch  --output {out}/out --error {out}/err -N {nb_nodes} -n {nb_nodes*4} scripts/{script} main_linprobe.py --finetune {checkpoint} --batch_size {batch_size} --model {model} --epochs {epochs}  --warmup_epochs {warmup_epochs} --blr {blr} --num_workers {num_workers} --output_dir {out} --cls_token {data}"
     print(cmd)
     call(cmd,shell=True)
