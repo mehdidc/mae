@@ -11,6 +11,7 @@
 import argparse
 import datetime
 import json
+from glob import glob
 import numpy as np
 import os
 import time
@@ -49,7 +50,10 @@ def get_args_parser():
 
     parser.add_argument('--input_size', default=224, type=int,
                         help='images input size')
-
+    parser.add_argument('--save_interval', default=20, type=int,
+                        help='images input size')
+    parser.add_argument('--label_type', default="int", type=str,
+                        help='images input size')
     parser.add_argument('--mask_ratio', default=0.75, type=float,
                         help='Masking ratio (percentage of removed patches).')
 
@@ -74,10 +78,12 @@ def get_args_parser():
     # Dataset parameters
     parser.add_argument('--data_path', default='/datasets01/imagenet_full_size/061417/', type=str,
                         help='dataset path')
+    parser.add_argument('--data_type', default='lmdb', type=str,
+                        help='dataset path')
 
     parser.add_argument('--output_dir', default='./output_dir',
                         help='path where to save, empty for no saving')
-    parser.add_argument('--log_dir', default='./output_dir',
+    parser.add_argument('--log_dir', default='',
                         help='path where to tensorboard log')
     parser.add_argument('--device', default='cuda',
                         help='device to use for training / testing')
@@ -106,7 +112,8 @@ def get_args_parser():
 
 def main(args):
     misc.init_distributed_mode(args)
-
+    if not args.log_dir:
+        args.log_dir = args.output_dir
     print('job dir: {}'.format(os.path.dirname(os.path.realpath(__file__))))
     print("{}".format(args).replace(', ', ',\n'))
 
@@ -125,9 +132,18 @@ def main(args):
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
-    dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'train'), transform=transform_train)
-    print(dataset_train)
 
+    from neotl.datasets.caffe_lmdb import CaffeLMDB, CaffeLMDBMultiple
+    if args.data_type == "lmdb":
+        # dataset_train = CaffeLMDB(args.data_path, transform=transform_train, label_type=args.label_type)
+        if os.path.exists(os.path.join(args.data_path, "data.mdb")):
+            paths = [args.data_path]
+        else:
+            paths = glob(os.path.join(args.data_path, "*"))
+        dataset_train = CaffeLMDBMultiple(paths, transform=transform_train, label_type=args.label_type)
+    elif args.data_type == "image_folder":
+        dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'train'), transform=transform_train)
+    # print(dataset_train)
     if True:  # args.distributed:
         num_tasks = misc.get_world_size()
         global_rank = misc.get_rank()
@@ -180,7 +196,19 @@ def main(args):
     optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
     print(optimizer)
     loss_scaler = NativeScaler()
-
+    if not args.resume:
+        #auto resume
+        ckpts = {}
+        for path in glob(os.path.join(args.log_dir, "*.pth")):
+            name = os.path.basename(path)
+            name = name.split(".")[0]
+            name = name.split("-")[1]
+            epoch = int(name)
+            ckpts[epoch] = path
+        if len(ckpts):
+            last_epoch = max(ckpts.keys())
+            args.resume = ckpts[last_epoch]
+            print("Auto load from ", args.resume)
     misc.load_model(args=args, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
 
     print(f"Start training for {args.epochs} epochs")
@@ -194,7 +222,7 @@ def main(args):
             log_writer=log_writer,
             args=args
         )
-        if args.output_dir and (epoch % 20 == 0 or epoch + 1 == args.epochs):
+        if args.output_dir and (epoch % args.save_interval == 0 or epoch + 1 == args.epochs):
             misc.save_model(
                 args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
                 loss_scaler=loss_scaler, epoch=epoch)

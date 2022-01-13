@@ -214,6 +214,7 @@ def save_on_master(*args, **kwargs):
 
 
 def init_distributed_mode(args):
+
     if args.dist_on_itp:
         args.rank = int(os.environ['OMPI_COMM_WORLD_RANK'])
         args.world_size = int(os.environ['OMPI_COMM_WORLD_SIZE'])
@@ -223,16 +224,22 @@ def init_distributed_mode(args):
         os.environ['RANK'] = str(args.rank)
         os.environ['WORLD_SIZE'] = str(args.world_size)
         # ["RANK", "WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT", "LOCAL_RANK"]
-    elif 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
-        args.rank = int(os.environ["RANK"])
-        args.world_size = int(os.environ['WORLD_SIZE'])
-        args.gpu = int(os.environ['LOCAL_RANK'])
+    # elif 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
+        # args.rank = int(os.environ["RANK"])
+        # args.world_size = int(os.environ['WORLD_SIZE'])
+        # args.gpu = int(os.environ['LOCAL_RANK'])
     elif 'SLURM_PROCID' in os.environ:
         args.rank = int(os.environ['SLURM_PROCID'])
-        args.gpu = args.rank % torch.cuda.device_count()
+        args.world_size =  int(os.getenv("SLURM_NTASKS"))
+        address = os.getenv("SLURM_LAUNCH_NODE_IPADDR")
+        # port = "29500"
+        port = "12345"
+        os.environ["MASTER_ADDR"] = address
+        os.environ["MASTER_PORT"] = port
+        args.gpu = int(os.environ['SLURM_LOCALID'])
+        print(args.rank, args.world_size, args.gpu)
     else:
         print('Not using distributed mode')
-        setup_for_distributed(is_master=True)  # hack
         args.distributed = False
         return
 
@@ -242,10 +249,14 @@ def init_distributed_mode(args):
     args.dist_backend = 'nccl'
     print('| distributed init (rank {}): {}, gpu {}'.format(
         args.rank, args.dist_url, args.gpu), flush=True)
-    torch.distributed.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
-                                         world_size=args.world_size, rank=args.rank)
+    torch.distributed.init_process_group(
+        backend=args.dist_backend, 
+        world_size=args.world_size, 
+        rank=args.rank
+    )
     torch.distributed.barrier()
     setup_for_distributed(args.rank == 0)
+
 
 
 class NativeScalerWithGradNormCount:
@@ -338,3 +349,29 @@ def all_reduce_mean(x):
         return x_reduce.item()
     else:
         return x
+
+class NoScaler:
+    state_dict_key = "amp_scaler"
+
+    def __init__(self):
+        self._scaler = torch.cuda.amp.GradScaler()
+
+    def __call__(self, loss, optimizer, clip_grad=None, parameters=None, create_graph=False, update_grad=True):
+        loss.backward(create_graph=create_graph)
+        if update_grad:
+            if clip_grad is not None:
+                assert parameters is not None
+                optimizer.synchronize()
+                norm = torch.nn.utils.clip_grad_norm_(parameters, clip_grad)
+            else:
+                norm = get_grad_norm_(parameters)
+        else:
+            norm = None
+        optimizer.step()
+        return norm
+
+    def state_dict(self):
+        return self._scaler.state_dict()
+
+    def load_state_dict(self, state_dict):
+        self._scaler.load_state_dict(state_dict)
