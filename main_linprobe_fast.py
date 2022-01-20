@@ -51,7 +51,7 @@ def get_args_parser():
     # Model parameters
     parser.add_argument('--model', default='vit_large_patch16', type=str, metavar='MODEL',
                         help='Name of model to train')
-
+    parser.add_argument('--train_ratio', default=1.0, type=float)
     # Optimizer parameters
     parser.add_argument('--weight_decay', type=float, default=0,
                         help='weight decay (default: 0 for linear probe following MoCo v1)')
@@ -63,13 +63,12 @@ def get_args_parser():
 
     parser.add_argument('--min_lr', type=float, default=0., metavar='LR',
                         help='lower lr bound for cyclic schedulers that hit 0')
-    parser.add_argument('--schedule', type=str, default='cosine', metavar='N',
-                        help='epochs to warmup LR')
-    parser.add_argument('--warmup_steps', type=int, default=10000, metavar='N',
-                        help='epochs to warmup LR')
 
     parser.add_argument('--warmup_epochs', type=int, default=10, metavar='N',
                         help='epochs to warmup LR')
+    parser.add_argument('--ckpt_interval', type=int, default=10, metavar='N',
+                        help='epochs to warmup LR')
+
 
     parser.add_argument('--label_type', default="int", type=str,
                         help='images input size')
@@ -128,7 +127,7 @@ def get_args_parser():
 
 
 def main(args):
-    misc.init_distributed_mode(args)
+    # misc.init_distributed_mode(args)
     if not args.log_dir:
         args.log_dir = args.output_dir
 
@@ -145,16 +144,17 @@ def main(args):
     cudnn.benchmark = True
 
     # linear probe: weak augmentation
-    transform_train = transforms.Compose([
-            RandomResizedCrop(224, interpolation=3),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
+    # transform_train = transforms.Compose([
+            # RandomResizedCrop(224, interpolation=3),
+            # transforms.RandomHorizontalFlip(),
+            # transforms.ToTensor(),
+            # transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
     transform_val = transforms.Compose([
             transforms.Resize(256, interpolation=3),
             transforms.CenterCrop(224),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
+    transform_train = transform_val
     if args.data_type == "image_folder":
         dataset_train = datasets.ImageFolder(os.path.join(args.data_path, "train"), transform=transform_train)
         dataset_val = datasets.ImageFolder(os.path.join(args.data_path, "val"), transform=transform_val)
@@ -193,47 +193,51 @@ def main(args):
         log_writer = SummaryWriter(log_dir=args.log_dir)
     else:
         log_writer = None
+    print(log_writer, args.log_dir)
 
     data_loader_train = torch.utils.data.DataLoader(
-        dataset_train, sampler=sampler_train,
+        dataset_train, 
+        #sampler=sampler_train,
+        shuffle=True,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         pin_memory=args.pin_mem,
-        drop_last=True,
+        # drop_last=True,
     )
 
     data_loader_val = torch.utils.data.DataLoader(
-        dataset_val, sampler=sampler_val,
+        dataset_val, 
+        #sampler=sampler_val,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         pin_memory=args.pin_mem,
-        drop_last=False
+        # drop_last=False
     )
 
-    model = models_vit.__dict__[args.model](
-        num_classes=args.nb_classes,
-        global_pool=args.global_pool,
-    )
-    if os.path.isdir(args.finetune):
-        #auto select latest checkpoint
-        ckpts = {}
-        for path in glob(os.path.join(args.finetune, "*.pth")):
-            name = os.path.basename(path)
-            try:
-                name = name.split(".")[0]
-                name = name.split("-")[1]
-                epoch = int(name)
-                ckpts[epoch] = path
-            except Exception:
-                ckpts[-1] = path
-        if len(ckpts):
-            last_epoch = max(ckpts.keys())
-            args.finetune = ckpts[last_epoch]
-            print("Auto load from ", args.finetune)
-
-    if args.finetune and not args.eval:
-        checkpoint = torch.load(args.finetune, map_location='cpu')
-
+    ckpts = {}
+    for path in glob(os.path.join(args.finetune, "*.pth")):
+        name = os.path.basename(path)
+        try:
+            name = name.split(".")[0]
+            name = name.split("-")[1]
+            epoch = int(name)
+            ckpts[epoch] = path
+        except Exception:
+            ckpts[-1] = path
+    epochs = sorted(list(ckpts.keys()))
+    args.finetune = [ckpts[epoch] for epoch in epochs]
+    log_stats = []
+    for epoch, ckpt in zip(epochs, args.finetune):
+        # if epoch != epochs[-1]:
+            # continue
+        if ((epoch % args.ckpt_interval) != 0) and (epoch != epochs[-1]):
+           continue
+        model = models_vit.__dict__[args.model](
+            num_classes=args.nb_classes,
+            global_pool=args.global_pool,
+        )
+        print(ckpt)
+        checkpoint = torch.load(ckpt, map_location='cpu')
         print("Load pre-trained checkpoint from: %s" % args.finetune)
         checkpoint_model = checkpoint['model']
         state_dict = model.state_dict()
@@ -256,96 +260,87 @@ def main(args):
 
         # manually initialize fc layer: following MoCo v3
         trunc_normal_(model.head.weight, std=0.01)
+        # for linear prob only
+        # hack: revise model's head with BN
+        # model.head = torch.nn.Sequential(torch.nn.BatchNorm1d(model.head.in_features, affine=False, eps=1e-6),)
+        model.head = torch.nn.Identity()
+        # freeze all but the head
+        for _, p in model.named_parameters():
+            p.requires_grad = False
+        for _, p in model.head.named_parameters():
+            p.requires_grad = True
 
-    # for linear prob only
-    # hack: revise model's head with BN
-    model.head = torch.nn.Sequential(torch.nn.BatchNorm1d(model.head.in_features, affine=False, eps=1e-6), model.head)
-    # freeze all but the head
-    for _, p in model.named_parameters():
-        p.requires_grad = False
-    for _, p in model.head.named_parameters():
-        p.requires_grad = True
+        model.to(device)
 
-    model.to(device)
+        model_without_ddp = model
+        n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        # print("Model = %s" % str(model_without_ddp))
+        # print('number of params (M): %.2f' % (n_parameters / 1.e6))
+        # eff_batch_size = args.batch_size * args.accum_iter * misc.get_world_size()
+        
+        # if args.lr is None:  # only base_lr is specified
+            # args.lr = args.blr * eff_batch_size / 256
 
-    model_without_ddp = model
-    n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        # print("base lr: %.2e" % (args.lr * 256 / eff_batch_size))
+        # print("actual lr: %.2e" % args.lr)
 
-    print("Model = %s" % str(model_without_ddp))
-    print('number of params (M): %.2f' % (n_parameters / 1.e6))
+        # print("accumulate grad iterations: %d" % args.accum_iter)
+        # print("effective batch size: %d" % eff_batch_size)
 
-    eff_batch_size = args.batch_size * args.accum_iter * misc.get_world_size()
-    
-    if args.lr is None:  # only base_lr is specified
-        args.lr = args.blr * eff_batch_size / 256
+        # model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
+        # model_without_ddp = model.module
+        # misc.load_model(args=args, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
+        from sklearn.linear_model import LogisticRegression, LinearRegression
+        from sklearn.metrics import classification_report
+        F_train, Y_train = features(model, data_loader_train, device)
+        if args.train_ratio < 1:
+            nb = int(len(F_train) * args.train_ratio)
+            F_train = F_train[:nb]
+            Y_train = Y_train[:nb]
+        F_val, Y_val = features(model, data_loader_val,device)
 
-    print("base lr: %.2e" % (args.lr * 256 / eff_batch_size))
-    print("actual lr: %.2e" % args.lr)
+        F_train = F_train.numpy()
+        Y_train = Y_train.numpy()
+        mean = F_train.mean(axis=0, keepdims=True)
+        std = F_train.std(axis=0, keepdims=True)
+        F_val = F_val.numpy()
+        Y_val = Y_val.numpy()
 
-    print("accumulate grad iterations: %d" % args.accum_iter)
-    print("effective batch size: %d" % eff_batch_size)
+        F_train = (F_train - mean) / std
+        F_val = (F_val - mean) / std
 
-    if args.distributed:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
-        model_without_ddp = model.module
+        clf = LogisticRegression(n_jobs=-1, verbose=1, solver='lbfgs', max_iter=100)
+        clf.fit(F_train, Y_train)
+        ypred = clf.predict(F_val)
+        print(classification_report(Y_val, ypred, digits=4))
+        test_acc = (ypred == Y_val).mean()
+        log_writer.add_scalar('test_acc', test_acc, epoch)
 
-    optimizer = LARS(model_without_ddp.head.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    print(optimizer)
-    loss_scaler = NativeScaler()
+        log_stats = {}
+        log_stats['epoch'] = epoch
+        log_stats['test_acc'] = test_acc
+        with open(os.path.join(args.output_dir, "log.txt"), mode="a", encoding="utf-8") as f:
+            f.write(json.dumps(log_stats) + "\n")
 
-    criterion = torch.nn.CrossEntropyLoss()
 
-    print("criterion = %s" % str(criterion))
-
-    misc.load_model(args=args, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
-
-    if args.eval:
-        test_stats = evaluate(data_loader_val, model, device)
-        print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
-        exit(0)
-
-    print(f"Start training for {args.epochs} epochs")
-    start_time = time.time()
-    max_accuracy = 0.0
-    for epoch in range(args.start_epoch, args.epochs):
-        if args.distributed:
-            data_loader_train.sampler.set_epoch(epoch)
-        train_stats = train_one_epoch(
-            model, criterion, data_loader_train,
-            optimizer, device, epoch, loss_scaler,
-            max_norm=None,
-            log_writer=log_writer,
-            args=args
-        )
-        if args.output_dir and args.save:
-            misc.save_model(
-                args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
-                loss_scaler=loss_scaler, epoch=epoch)
-
-        test_stats = evaluate(data_loader_val, model, device)
-        print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
-        max_accuracy = max(max_accuracy, test_stats["acc1"])
-        print(f'Max accuracy: {max_accuracy:.2f}%')
-
-        if log_writer is not None:
-            log_writer.add_scalar('perf/test_acc1', test_stats['acc1'], epoch)
-            log_writer.add_scalar('perf/test_acc5', test_stats['acc5'], epoch)
-            log_writer.add_scalar('perf/test_loss', test_stats['loss'], epoch)
-
-        log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
-                        **{f'test_{k}': v for k, v in test_stats.items()},
-                        'epoch': epoch,
-                        'n_parameters': n_parameters}
-
-        if args.output_dir and misc.is_main_process():
-            if log_writer is not None:
-                log_writer.flush()
-            with open(os.path.join(args.output_dir, "log.txt"), mode="a", encoding="utf-8") as f:
-                f.write(json.dumps(log_stats) + "\n")
-
-    total_time = time.time() - start_time
-    total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-    print('Training time {}'.format(total_time_str))
+def features(model, dl, device):
+    Flist = []
+    Ylist  =[]
+    for X, Y in dl:
+        with torch.no_grad():
+            X = X.to(device)
+            F = model(X).cpu()
+            Flist.append(F)
+            Ylist.append(Y.cpu())
+    F = torch.cat(Flist)
+    Y = torch.cat(Ylist)
+    # F_all = [torch.ones_like(F) for _ in range(misc.get_world_size())]
+    # dist.all_gather(F_all, F, async_op=False)
+    # F = torch.cat(F_all)
+    # Y_all = [torch.ones_like(Y) for _ in range(misc.get_world_size())]
+    # dist.all_gather(Y_all, Y, async_op=False)
+    # Y = torch.cat(Y_all)
+    return F, Y
 
 
 if __name__ == '__main__':

@@ -8,6 +8,12 @@
 # DeiT: https://github.com/facebookresearch/deit
 # BEiT: https://github.com/microsoft/unilm/tree/master/beit
 # --------------------------------------------------------
+from multiprocessing import Process, freeze_support
+from torch.multiprocessing import Pool, Process, set_start_method
+try:
+    set_start_method('spawn')
+except RuntimeError:
+    pass
 import argparse
 import datetime
 import json
@@ -43,12 +49,15 @@ def get_args_parser():
     parser.add_argument('--epochs', default=400, type=int)
     parser.add_argument('--accum_iter', default=1, type=int,
                         help='Accumulate gradient iterations (for increasing the effective batch size under memory constraints)')
-
+    parser.add_argument('--dataset_size', default=10**6, type=int)
     # Model parameters
     parser.add_argument('--model', default='mae_vit_large_patch16', type=str, metavar='MODEL',
                         help='Name of model to train')
     parser.add_argument('--disable_amp', action='store_true',
                         help='disable mixed-precision training (requires more memory and compute)')
+
+    parser.add_argument('--wds_input_col', default='jpg', type=str)
+    parser.add_argument('--wds_output_col', default='cls', type=str)
 
     parser.add_argument('--input_size', default=224, type=int,
                         help='images input size')
@@ -76,7 +85,10 @@ def get_args_parser():
 
     parser.add_argument('--warmup_epochs', type=int, default=40, metavar='N',
                         help='epochs to warmup LR')
-
+    parser.add_argument('--warmup_steps', type=int, default=10000, metavar='N',
+                        help='epochs to warmup LR')
+    parser.add_argument('--schedule', type=str, default='cosine', metavar='N',
+                        help='epochs to warmup LR')
     # Dataset parameters
     parser.add_argument('--data_path', default='/datasets01/imagenet_full_size/061417/', type=str,
                         help='dataset path')
@@ -112,6 +124,19 @@ def get_args_parser():
     return parser
 
 
+class DataLoaderWithLen:
+
+    def __init__(self, dl, length):
+        self.dl = dl
+        self.length = length
+
+    def __iter__(self):
+        for data in self.dl:
+            yield data
+
+    def __len__(self):
+        return self.length
+
 def main(args):
     misc.init_distributed_mode(args)
     if not args.log_dir:
@@ -145,14 +170,30 @@ def main(args):
         dataset_train = CaffeLMDBMultiple(paths, transform=transform_train, label_type=args.label_type)
     elif args.data_type == "image_folder":
         dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'train'), transform=transform_train)
+    elif args.data_type == "webdataset":
+        # from neotl.datasets.wds import PytorchShardList, SimpleShardList
+        import webdataset as wds
+        tars = glob(os.path.join(args.data_path, "**", "*.tar"))
+        shardlist = wds.PytorchShardList(tars, epoch_shuffle=True, shuffle=True)
+        ds = wds.WebDataset(shardlist, handler=wds.warn_and_continue)
+        # ds = ds.shuffle(8192, initial=8192)
+        ds = ds.decode("pil")
+        ds = ds.to_tuple(args.wds_input_col, args.wds_output_col)
+        ds = ds.map_tuple(transform_train,  int)
+        ds = ds.batched(args.batch_size)
+        dataset_train = ds 
+
     # print(dataset_train)
     if True:  # args.distributed:
         num_tasks = misc.get_world_size()
         global_rank = misc.get_rank()
-        sampler_train = torch.utils.data.DistributedSampler(
-            dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
-        )
-        print("Sampler_train = %s" % str(sampler_train))
+        if args.data_type == "webdataset":
+            sampler_train = None
+        else:
+            sampler_train = torch.utils.data.DistributedSampler(
+                dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
+            )
+            print("Sampler_train = %s" % str(sampler_train))
     else:
         sampler_train = torch.utils.data.RandomSampler(dataset_train)
 
@@ -161,15 +202,28 @@ def main(args):
         log_writer = SummaryWriter(log_dir=args.log_dir)
     else:
         log_writer = None
-
-    data_loader_train = torch.utils.data.DataLoader(
-        dataset_train, sampler=sampler_train,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        pin_memory=args.pin_mem,
-        drop_last=True,
-    )
     
+    if args.data_type == "webdataset":
+        data_loader_train = wds.WebLoader(
+            dataset_train, 
+            batch_size=None,
+            shuffle=False,
+            num_workers=args.num_workers,
+            pin_memory=args.pin_mem,
+            # drop_last=True,
+            # persistent_workers=True,
+        )
+        length = args.dataset_size // (args.batch_size * misc.get_world_size())
+        data_loader_train = DataLoaderWithLen(data_loader_train, length)
+    else:
+        data_loader_train = torch.utils.data.DataLoader(
+            dataset_train, sampler=sampler_train,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            pin_memory=args.pin_mem,
+            drop_last=True,
+            # persistent_workers=True,
+        )
     # define the model
     model = models_mae.__dict__[args.model](norm_pix_loss=args.norm_pix_loss)
 
@@ -216,8 +270,11 @@ def main(args):
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
     for epoch in range(args.start_epoch, args.epochs):
-        if args.distributed:
-            data_loader_train.sampler.set_epoch(epoch)
+        if args.data_type == "webdataset":
+            os.environ['WDS_EPOCH'] = str(epoch)
+        else:
+            if args.distributed:
+                data_loader_train.sampler.set_epoch(epoch)
         train_stats = train_one_epoch(
             model, data_loader_train,
             optimizer, device, epoch, loss_scaler,
