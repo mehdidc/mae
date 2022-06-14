@@ -137,6 +137,9 @@ class DataLoaderWithLen:
     def __len__(self):
         return self.length
 
+def filter_no_caption(sample):
+    return 'txt' in sample
+
 def main(args):
     misc.init_distributed_mode(args)
     if not args.log_dir:
@@ -171,20 +174,31 @@ def main(args):
     elif args.data_type == "image_folder":
         dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'train'), transform=transform_train)
     elif args.data_type == "webdataset":
-        # from neotl.datasets.wds import PytorchShardList, SimpleShardList
         import webdataset as wds
         tars = glob(os.path.join(args.data_path, "**", "*.tar"))
         shardlist = wds.PytorchShardList(tars, epoch_shuffle=True, shuffle=True)
-        ds = wds.WebDataset(shardlist, handler=wds.warn_and_continue)
-        # ds = ds.shuffle(8192, initial=8192)
-        ds = ds.decode("pil")
-        ds = ds.to_tuple(args.wds_input_col, args.wds_output_col)
-        ds = ds.map_tuple(transform_train,  int)
-        ds = ds.batched(args.batch_size)
+        if args.label_type == "int":
+            ds = wds.WebDataset(shardlist, handler=wds.warn_and_continue)
+            ds = ds.decode("pil")
+            ds = ds.to_tuple(args.wds_input_col, args.wds_output_col)
+            ds = ds.map_tuple(transform_train,  int)
+            ds = ds.batched(args.batch_size)
+        elif args.label_type == "str":
+            ds = (
+                wds.WebDataset(shardlist)
+                .select(filter_no_caption)
+                .decode("pil", handler=wds.ignore_and_continue)
+                .rename(image=args.wds_input_col, text=args.wds_output_col)
+                .map_dict(image=transform_train, text=str)
+                .to_tuple("image", "text")
+                .batched(args.batch_size)
+            )
+        else:
+            raise ValueError(args.label_type)
+        
         dataset_train = ds 
 
-    # print(dataset_train)
-    if True:  # args.distributed:
+    if True:
         num_tasks = misc.get_world_size()
         global_rank = misc.get_rank()
         if args.data_type == "webdataset":

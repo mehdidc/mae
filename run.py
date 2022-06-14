@@ -7,6 +7,7 @@ datasets = {
     "imagenet1k_wds": "--data_path datasets/imagenet-1K-webdataset/train --data_type webdataset --dataset_size 1281167 --wds_input_col input.jpg --wds_output_col output.txt",
     "imagenet21k": "--data_path datasets/imagenet-21K-lmdb --label_type int --data_type lmdb",
     "imagenet21k_wds": "--data_path datasets/imagenet-21K-webdataset --dataset_size 14197030 --wds_input_col jpg --wds_output_col cls --data_type webdataset",
+    "laion400m": "--data_path datasets/LAION-400M --dataset_size 407332084 --wds_input_col 'jpg;png' --wds_output_col txt --data_type webdataset --label_type str",
 }
 finetune_datasets = {
     "imagenet1k": "--data_path datasets/imagenet-1K-lmdb --label_type int --data_type lmdb",
