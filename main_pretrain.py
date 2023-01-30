@@ -94,6 +94,8 @@ def get_args_parser():
                         help='dataset path')
     parser.add_argument('--data_type', default='lmdb', type=str,
                         help='dataset path')
+    parser.add_argument('--aug', default='random_resized_Crop', type=str,
+                        help='dataset path')
 
     parser.add_argument('--output_dir', default='./output_dir',
                         help='path where to save, empty for no saving')
@@ -120,6 +122,7 @@ def get_args_parser():
     parser.add_argument('--dist_on_itp', action='store_true')
     parser.add_argument('--dist_url', default='env://',
                         help='url used to set up distributed training')
+    parser.add_argument('--channels', type=int, default=3)
 
     return parser
 
@@ -157,14 +160,33 @@ def main(args):
     cudnn.benchmark = True
 
     # simple augmentation
-    transform_train = transforms.Compose([
-            transforms.RandomResizedCrop(args.input_size, scale=(0.2, 1.0), interpolation=3),  # 3 is bicubic
-            transforms.RandomHorizontalFlip(),
+    if args.aug == 'random_resized_crop':
+        transform_train = transforms.Compose([
+                transforms.RandomResizedCrop(args.input_size, scale=(0.2, 1.0), interpolation=3),  # 3 is bicubic
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
+    elif args.aug == 'random_resized_crop2':
+        transform_train = transforms.Compose([
+                transforms.RandomResizedCrop(args.input_size, scale=(0.08, 1.0), interpolation=3, ratio=(1.,1.)  ),  # 3 is bicubic
+                transforms.ToTensor(),
+                ( transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]) if args.channels == 3 else transforms.Normalize(mean=[0.5], std=[0.5]) ),
+        ])
+    elif args.aug == 'simple':
+        transform_train = transforms.Compose([
+            transforms.Resize( (args.input_size, args.input_size), interpolation=3),  # 3 is bicubic
             transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
+            ( transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]) if args.channels == 3 else transforms.Normalize(mean=[0.5], std=[0.5]) ),
 
-    from neotl.datasets.caffe_lmdb import CaffeLMDB, CaffeLMDBMultiple
+        ])
+    elif args.aug == 'crop':
+        transform_train = transforms.Compose([
+            transforms.RandomCrop( (args.input_size, args.input_size)),  # 3 is bicubic
+            transforms.ToTensor(),
+            ( transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]) if args.channels == 3 else transforms.Normalize(mean=[0.5], std=[0.5]) ),
+        ])
     if args.data_type == "lmdb":
+        from neotl.datasets.caffe_lmdb import CaffeLMDB, CaffeLMDBMultiple
         # dataset_train = CaffeLMDB(args.data_path, transform=transform_train, label_type=args.label_type)
         if os.path.exists(os.path.join(args.data_path, "data.mdb")):
             paths = [args.data_path]
@@ -223,7 +245,7 @@ def main(args):
             batch_size=None,
             shuffle=False,
             num_workers=args.num_workers,
-            pin_memory=args.pin_mem,
+            # pin_memory=args.pin_mem,
             # drop_last=True,
             # persistent_workers=True,
         )
@@ -234,12 +256,12 @@ def main(args):
             dataset_train, sampler=sampler_train,
             batch_size=args.batch_size,
             num_workers=args.num_workers,
-            pin_memory=args.pin_mem,
+            # pin_memory=args.pin_mem,
             drop_last=True,
-            # persistent_workers=True,
+            persistent_workers=True,
         )
     # define the model
-    model = models_mae.__dict__[args.model](norm_pix_loss=args.norm_pix_loss)
+    model = models_mae.__dict__[args.model](img_size=args.input_size,norm_pix_loss=args.norm_pix_loss, in_chans=args.channels)
 
     model.to(device)
 
@@ -269,16 +291,21 @@ def main(args):
     if not args.resume:
         #auto resume
         ckpts = {}
-        for path in glob(os.path.join(args.log_dir, "*.pth")):
-            name = os.path.basename(path)
-            name = name.split(".")[0]
-            name = name.split("-")[1]
-            epoch = int(name)
-            ckpts[epoch] = path
-        if len(ckpts):
-            last_epoch = max(ckpts.keys())
-            args.resume = ckpts[last_epoch]
+        args.resume = os.path.join(args.log_dir, "checkpoint.pth")
+        if not os.path.exists(args.resume):
+            args.resume = ""
+        else:
             print("Auto load from ", args.resume)
+        # for path in glob(os.path.join(args.log_dir, "*.pth")):
+            # name = os.path.basename(path)
+            # name = name.split(".")[0]
+            # name = name.split("-")[1]
+            # epoch = int(name)
+            # ckpts[epoch] = path
+        # if len(ckpts):
+            # last_epoch = max(ckpts.keys())
+            # args.resume = ckpts[last_epoch]
+            # print("Auto load from ", args.resume)
     misc.load_model(args=args, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
 
     print(f"Start training for {args.epochs} epochs")

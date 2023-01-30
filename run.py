@@ -8,6 +8,7 @@ datasets = {
     "imagenet21k": "--data_path datasets/imagenet-21K-lmdb --label_type int --data_type lmdb",
     "imagenet21k_wds": "--data_path datasets/imagenet-21K-webdataset --dataset_size 14197030 --wds_input_col jpg --wds_output_col cls --data_type webdataset",
     "laion400m": "--data_path datasets/LAION-400M --dataset_size 407332084 --wds_input_col 'jpg;png' --wds_output_col txt --data_type webdataset --label_type str",
+    "solar": '--data_path datasets/solar --data_type image_folder',
 }
 finetune_datasets = {
     "imagenet1k": "--data_path datasets/imagenet-1K-lmdb --label_type int --data_type lmdb",
@@ -18,7 +19,7 @@ def pretrain(
     *, 
     nb_nodes=16, 
     mask_ratio=0.75, 
-    model="vit_large_patch16", 
+    model="mae_vit_large_patch16", 
     batch_size=64, 
     epochs=800, 
     warmup_epochs=40, 
@@ -28,14 +29,17 @@ def pretrain(
     weight_decay=0.05, 
     data="imagenet1k", 
     num_workers=20, 
+    input_size=224,
     folder="results/imagenet1k", 
     save_interval=20, 
     amp=True,
+    aug='random_resized_crop',
+    channels=3,
 ):
     script = f"run_{machine}_ddp.sh"
     data = datasets[data]
     amp = "" if amp else "--disable_amp"
-    cmd = f"sbatch  --output {folder}/out --error {folder}/err -N {nb_nodes} -n {nb_nodes*4} scripts/{script} main_pretrain.py --batch_size {batch_size} --model {model} --norm_pix_loss --mask_ratio {mask_ratio} --epochs {epochs}  --warmup_epochs {warmup_epochs} --blr {blr} --weight_decay {weight_decay}  --num_workers {num_workers} --output_dir {folder} --log_dir {folder} --save_interval {save_interval} {data} {amp} --warmup_steps {warmup_steps} --schedule {schedule}"
+    cmd = f"sbatch  --output {folder}/out --error {folder}/err -N {nb_nodes} -n {nb_nodes*4} scripts/{script} main_pretrain.py --batch_size {batch_size} --model {model} --norm_pix_loss --mask_ratio {mask_ratio} --epochs {epochs}  --warmup_epochs {warmup_epochs} --blr {blr} --weight_decay {weight_decay}  --num_workers {num_workers} --output_dir {folder} --log_dir {folder} --save_interval {save_interval} {data} {amp} --warmup_steps {warmup_steps} --schedule {schedule} --input_size {input_size} --aug {aug} --channels {channels}"
     call(cmd,shell=True)
 
 

@@ -38,6 +38,8 @@ def train_one_epoch(model: torch.nn.Module,
         print('log_dir: {}'.format(log_writer.log_dir))
 
     for data_iter_step, (samples, _) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
+        if args.channels == 1:
+            samples = samples[:, 0:1]
         # we use a per iteration (instead of per epoch) lr scheduler
         step = data_iter_step + epoch * len(data_loader)
         if data_iter_step % accum_iter == 0:

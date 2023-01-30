@@ -7,6 +7,7 @@
 #SBATCH --gres=gpu:4
 #SBATCH --partition=dc-gpu
 source set_torch_distributed_vars.sh
+#source /p/project/laionize/miniconda/bin/activate open_clip
 source scripts/init.sh
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 echo "Job id: $SLURM_JOB_ID"
